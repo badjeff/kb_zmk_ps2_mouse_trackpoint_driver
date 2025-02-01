@@ -43,7 +43,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 // Specification`...
 // "The POR shall be timed to occur 600 ms ± 20 % from the time power is
 //  applied to the TrackPoint controller."
-#define MOUSE_PS2_POWER_ON_RESET_TIME K_MSEC(600)
+#define MOUSE_PS2_POWER_ON_RESET_TIME K_MSEC(CONFIG_ZMK_INPUT_MOUSE_PS2_POWER_ON_RESET_TIME)
 
 // Common PS/2 Mouse commands
 #define MOUSE_PS2_CMD_GET_DEVICE_ID "\xf2"

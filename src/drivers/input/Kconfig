@@ -16,6 +16,12 @@ config ZMK_INPUT_MOUSE_PS2_ENABLE_PS2_RESEND_CALLBACK
 
 if ZMK_INPUT_MOUSE_PS2
 
+config ZMK_INPUT_MOUSE_PS2_POWER_ON_RESET_TIME
+    int "The POR shall be timed to occur 600 ms ± 20 % from the time power is applied to the TrackPoint controller."
+    default 600
+    help
+      Refer to IBM TrackPoint System Version 4.0 Engineering Specification - Section 2.1
+
 config ZMK_INPUT_MOUSE_PS2_ENABLE_UROB_COMPAT
     bool "Makes the driver compatible with urob's zmk fork. His fork has commits that change the default zmk function definitions. This option adopts the code to make it compatible with his changes. Only enable it if you are using his fork or it will fail to compile."
 	default n
