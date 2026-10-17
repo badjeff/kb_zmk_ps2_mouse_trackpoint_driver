@@ -287,8 +287,12 @@ void zmk_mouse_ps2_activity_callback(const struct device *dev,
         // again.
         int alignment_bit = MOUSE_PS2_GET_BIT(byte, 3);
         if (alignment_bit != 1) {
-
-            zmk_mouse_ps2_activity_abort_cmd(data->dev, "Bit 3 of packet is 0 instead of 1");
+            // Out of sync: drop the byte and wait for the next packet start.
+            // Don't send a resend command: the device is still streaming, and
+            // writing to it mid-packet causes collisions (parity errors) and
+            // garbage replies that keep us out of sync.
+            LOG_DBG("Dropping out-of-sync byte 0x%x", byte);
+            zmk_mouse_ps2_activity_reset_packet_buffer(data->dev);
             return;
         }
     } else if (data->packet_idx == 1) {
@@ -311,14 +315,13 @@ void zmk_mouse_ps2_activity_callback(const struct device *dev,
 
 void zmk_mouse_ps2_activity_abort_cmd(const struct device *dev, char *reason) {
     struct zmk_mouse_ps2_data *data = dev->data;
-    const struct zmk_mouse_ps2_config *config = dev->config;
-    const struct device *ps2_device = config->ps2_device;
 
-    LOG_ERR("PS/2 Mouse cmd buffer is out of aligment. Requesting resend: %s", reason);
+    // Don't ask the device to resend: it is still streaming, and writing to
+    // it mid-packet collides with its transmission. Just drop the packet and
+    // resync on the next one.
+    LOG_WRN("PS/2 Mouse packet dropped (out of alignment): %s", reason);
 
     data->packet_idx = 0;
-    ps2_write(ps2_device, MOUSE_PS2_CMD_RESEND[0]);
-
     zmk_mouse_ps2_activity_reset_packet_buffer(dev);
 }
 
