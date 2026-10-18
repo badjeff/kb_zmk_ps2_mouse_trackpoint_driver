@@ -6,6 +6,7 @@
 
 #define DT_DRV_COMPAT zmk_input_mouse_ps2
 
+#include <errno.h>
 #include <stdlib.h>
 
 #include <zephyr/device.h>
@@ -29,6 +30,8 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 // How often the driver try to initialize a mouse before we give up.
 #define MOUSE_PS2_INIT_ATTEMPTS 10
+// Max time to skip over stale (non self-test) bytes while waiting for the self-test result
+#define MOUSE_PS2_INIT_STALE_TIMEOUT_MS 3000
 
 // Mouse activity packets are at least three bytes.
 // This defines how much time between bytes can pass before
@@ -1887,19 +1890,42 @@ int zmk_mouse_ps2_init_wait_for_mouse(const struct device *dev) {
         LOG_INF("Trying to initialize mouse device (attempt %d / %d)", i + 1,
                 MOUSE_PS2_INIT_ATTEMPTS);
 
-        // PS/2 Devices do a self-test and send the result when they power up.
+        // PS/2 Devices do a self-test and send the result (0xaa) when they power up.
+        //
+        // But when a zmk device is reset, it doesn't cut the power to external
+        // devices. So the device acts as if it was never disconnected. If it is
+        // moved at that moment, the queue is full of regular movement packets
+        // instead of a self-test result. Those bytes must neither be mistaken
+        // for the self-test result nor use up the init attempts. So skip over
+        // everything that is not 0xaa, and send the reset command once to make
+        // the device send a real self-test result.
 
-        err = ps2_read(config->ps2_device, &read_val);
-        if (err == 0) {
-            if (read_val != MOUSE_PS2_RESP_SELF_TEST_PASS) {
-                LOG_WRN("Got invalid PS/2 self-test result: 0x%x", read_val);
+        bool reset_sent = false;
+        int stale_bytes = 0;
+        int64_t deadline = k_uptime_get() + MOUSE_PS2_INIT_STALE_TIMEOUT_MS;
 
-                LOG_INF("Trying to reset PS2 device...");
-                zmk_mouse_ps2_reset(dev, config->ps2_device);
-
-                continue;
+        while (true) {
+            err = ps2_read(config->ps2_device, &read_val);
+            if (err != 0 || read_val == MOUSE_PS2_RESP_SELF_TEST_PASS) {
+                break;
             }
 
+            stale_bytes++;
+            LOG_DBG("Ignoring unexpected byte 0x%x while waiting for self-test result", read_val);
+
+            if (!reset_sent) {
+                LOG_WRN("Got unexpected data instead of PS/2 self-test result: 0x%x", read_val);
+                LOG_INF("Trying to reset PS2 device...");
+                reset_sent = (zmk_mouse_ps2_reset(dev, config->ps2_device) == 0);
+            }
+
+            if (k_uptime_get() > deadline) {
+                err = -ETIMEDOUT;
+                break;
+            }
+        }
+
+        if (err == 0) {
             LOG_INF("PS/2 Device passed self-test: 0x%x", read_val);
 
             // Read device id
@@ -1911,6 +1937,10 @@ int zmk_mouse_ps2_init_wait_for_mouse(const struct device *dev) {
                 if (read_val == 0) {
                     LOG_INF("Connected PS/2 device is a mouse...");
                     return 0;
+                } else if (stale_bytes > 0) {
+                    // The 0xaa was most likely just a movement byte.
+                    LOG_WRN("Unexpected device id 0x%x after stale data, retrying", read_val);
+                    continue;
                 } else {
                     LOG_WRN("PS/2 device is not a mouse: 0x%x", read_val);
                     return 1;
@@ -1920,9 +1950,7 @@ int zmk_mouse_ps2_init_wait_for_mouse(const struct device *dev) {
             LOG_WRN("Could not read PS/2 device self-test result: %d. ", err);
         }
 
-        // But when a zmk device is reset, it doesn't cut the power to external
-        // devices. So the device acts as if it was never disconnected.
-        // So we try sending the reset command.
+        // Try sending the reset command.
         if (i % 2 == 0) {
             LOG_INF("Trying to reset PS2 device...");
             zmk_mouse_ps2_reset(dev, config->ps2_device);
