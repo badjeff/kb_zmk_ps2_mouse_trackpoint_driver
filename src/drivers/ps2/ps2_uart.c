@@ -145,6 +145,9 @@ struct ps2_uart_data_queue_item {
     uint8_t byte;
 };
 
+// Bytes waiting to be handed to the ps2 callback
+#define PS2_UART_CALLBACK_QUEUE_SIZE 64
+
 struct ps2_uart_config {
     int ps2_uart_idx;
 
@@ -165,7 +168,8 @@ struct ps2_uart_data {
 
     // PS2 driver interface callback
     struct k_work callback_work;
-    uint8_t callback_byte;
+    struct k_msgq callback_queue;
+    uint8_t callback_queue_buffer[PS2_UART_CALLBACK_QUEUE_SIZE];
     ps2_callback_t callback_isr;
 #if IS_ENABLED(CONFIG_PS2_UART_ENABLE_PS2_RESEND_CALLBACK)
     ps2_resend_callback_t resend_callback_isr;
@@ -612,7 +616,15 @@ void ps2_uart_read_process_received_byte(const struct device *dev, uint8_t byte)
         // Call callback from a worker to make sure the callback
         // doesn't block the interrupt.
         // Will call ps2_uart_read_callback_work_handler
-        data->callback_byte = byte;
+        //
+        // The byte goes into a queue. A single shared variable would lose
+        // bytes (or deliver them twice or as 0x0) whenever the callback is
+        // slower than the time between two bytes (about 1 ms at 14400 baud),
+        // e.g. while it waits for the HID/BLE stack.
+        if (k_msgq_put(&data->callback_queue, &byte, K_NO_WAIT) != 0) {
+            LOG_WRN("Callback queue is full, dropping byte 0x%x", byte);
+        }
+
         k_work_submit_to_queue(&ps2_uart_work_queue_cb, &data->callback_work);
     } else {
         ps2_uart_data_queue_add(dev, byte);
@@ -642,10 +654,17 @@ void ps2_uart_read_callback_work_handler(struct k_work *work) {
     struct ps2_uart_data *data = CONTAINER_OF(work,
                                               struct ps2_uart_data,
                                               callback_work);
-    // const struct device *dev = data->dev;
+    uint8_t byte;
 
-    data->callback_isr(data->dev, data->callback_byte);
-    data->callback_byte = 0x0;
+    // Pass on every queued byte, not just the latest one.
+    while (k_msgq_get(&data->callback_queue, &byte, K_NO_WAIT) == 0) {
+        if (data->callback_isr == NULL || !data->callback_enabled) {
+            // The callback was disabled while the byte was waiting
+            continue;
+        }
+
+        data->callback_isr(data->dev, byte);
+    }
 }
 
 /*
@@ -1192,6 +1211,7 @@ static int ps2_uart_disable_callback(const struct device *dev) {
     ps2_uart_data_queue_empty(dev);
 
     data->callback_enabled = false;
+    k_msgq_purge(&data->callback_queue);
 
     // LOG_DBG("Disabled PS2 callback.");
 
@@ -1200,6 +1220,7 @@ static int ps2_uart_disable_callback(const struct device *dev) {
 
 static int ps2_uart_enable_callback(const struct device *dev) {
     struct ps2_uart_data *data = dev->data;
+    k_msgq_purge(&data->callback_queue);
     data->callback_enabled = true;
 
     // LOG_DBG("Enabled PS2 callback.");
@@ -1232,7 +1253,6 @@ static int ps2_uart_init(const struct device *dev) {
     // the ps2 callback
     data->dev = dev;
 
-    data->callback_byte = 0x0;
     data->callback_isr = NULL;
     data->callback_enabled = false;
     data->cur_write_status = PS2_UART_WRITE_STATUS_INACTIVE;
@@ -1260,6 +1280,10 @@ static int ps2_uart_init(const struct device *dev) {
     // Init data queue for synchronous read operations
     k_msgq_init(&data->data_queue, data->data_queue_buffer, sizeof(struct ps2_uart_data_queue_item),
                 PS2_UART_DATA_QUEUE_SIZE);
+
+    // Init queue for bytes that are passed to the ps2 callback
+    k_msgq_init(&data->callback_queue, data->callback_queue_buffer, sizeof(uint8_t),
+                PS2_UART_CALLBACK_QUEUE_SIZE);
 
     if (config->ps2_uart_idx == 0) {
         // Custom queue for background PS/2 processing work at high priority
